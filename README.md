@@ -1,118 +1,94 @@
 # Dripio: Payment Streaming Ecosystem
 
-Este proyecto consiste en tres contratos principales escritos en Solidity (versión 0.8.28) que conforman un sistema de **Payment Streaming** para empresas, proyectos y empleados. El objetivo es permitir que cada empresa gestione presupuestos, proyectos y empleados, ofreciendo pagos continuos (streams) de forma segura y transparente, con la posibilidad de administrar bonus y cancelar flujos de pago según las reglas configuradas.
+Este repositorio contiene **cuatro contratos** principales escritos en Solidity (versión 0.8.x) que conforman un sistema de **Payment Streaming** para empresas, proyectos y empleados. Cada contrato desempeña una función específica, asegurando un flujo de pagos continuo y seguro para los empleados, con la posibilidad de cancelar y pausar streams, manejar indemnizaciones y más.
 
 ---
 
-## Estructura de Contratos
+## **Contratos**
 
-1. **Treasury.sol**  
-   - Se encarga de **custodiar los fondos** de cada empresa en sub-bóvedas diferenciadas.  
-   - Soporta múltiples tokens (USDC, USDT, DAI) y Ether (usando `address(0)` como identificador).  
-   - Solo los **contratos autorizados** pueden retirar fondos (por ejemplo, el contrato `PaymentStreaming`).  
-   - Emite eventos `Deposit`, `Withdraw` y `AuthorizedContract`.
+1. **RoleManager.sol**  
+   - Define roles globales: `COMPANY_OWNER_ROLE`, `PROJECT_ADMIN_ROLE`, `TREASURY_ADMIN_ROLE`, `PAYMENT_ADMIN_ROLE`.  
+   - Maneja asignaciones locales por compañía mediante `companyProjectAdmins[companyId][user]`.  
+   - Permite que el dueño de compañía o un admin global asigne o revoque estos roles.
 
 2. **CompanyRegistry.sol**  
-   - Registra **empresas**, **proyectos** y **empleados**.  
-   - Controla la **propiedad** de cada empresa.  
-   - Permite a los dueños de empresa crear proyectos, añadir empleados y dar de baja a los empleados.  
-   - Emite eventos `CompanyCreated`, `ProjectCreated`, `EmployeeAdded` y `EmployeeRemoved`.
+   - Registra **empresas** con un “dueño nominal” (owner) y una tarifa fija al crearlas.  
+   - Administra **proyectos** y **empleados**, verificando que solo el dueño, o roles específicos (admins globales/locales), tengan permiso para dichas operaciones.  
+   - Emite eventos para la creación de compañías, proyectos y la gestión de empleados.
 
-3. **PaymentStreaming.sol**  
-   - **Recibe** los fondos reservados en la `Treasury` para cada empresa y crea **streams** de pago para los empleados.  
-   - Maneja la lógica de **salarios** y **bonus** (o “isBonus”), calculando cuánto pueden retirar los empleados en cada momento.  
-   - Permite **cancelar** un stream y devolver fondos no retirados al tesoro de la empresa.  
-   - Emite eventos `StreamCreated`, `Withdraw` y `StreamCancelled`.
+3. **Treasury.sol**  
+   - Custodia los fondos en sub-bóvedas (companyId, projectId, token).  
+   - Soporta Ether (address(0)) y cualquier token ERC20 (mediante `transferFrom` y `transfer`).  
+   - Limita el retiro de fondos a usuarios con `TREASURY_ADMIN_ROLE` o a contratos autorizados (por ejemplo, `PaymentStreaming`).  
+   - Emite eventos de depósito y retiro.
 
----
-
-## Resumen del Funcionamiento
-
-1. **Creación de Empresa**  
-   - Usar `CompanyRegistry.createCompany(companyId)` para registrar una nueva empresa.  
-   - Solo un `companyId` que no exista puede ser creado.
-
-2. **Creación de Proyecto**  
-   - El dueño de la empresa llama a `CompanyRegistry.createProject(projectId, companyId, startDate, endDate)`.  
-   - Se define el **rango temporal** del proyecto.  
-   - Registra el proyecto como activo.
-
-3. **Añadir Empleados**  
-   - El dueño del proyecto (dueño de la empresa asociada) añade empleados vía `CompanyRegistry.addEmployee(projectId, wallet, hasBonus)`.
-
-4. **Depositar Fondos**  
-   - La empresa deposita fondos en su **sub-bóveda** usando `Treasury.depositFunds(companyId, token, amount)` o enviando Ether si `token == address(0)`.
-
-5. **Crear Streams de Pago**  
-   - En `PaymentStreaming.createStream(...)`, se define el `totalAmount`, `startTime`, `endTime` y si es un **bonus**.  
-   - El contrato `PaymentStreaming` debe estar **autorizado** en `Treasury` para poder luego retirar fondos a favor del empleado.
-
-6. **Retirar Fondos (Empleado)**  
-   - El empleado llama a `PaymentStreaming.withdraw(streamId)`.  
-   - Se calcula el saldo acumulado (`balanceOf(streamId)`) y se transfiere desde la `Treasury` hasta la cuenta del empleado.
-
-7. **Cancelar Stream**  
-   - El dueño del proyecto puede llamar a `PaymentStreaming.cancelStream(streamId)`.  
-   - Cualquier saldo no retirado se considera devuelto al tesoro de la empresa (lógica conceptual, no hay transferencia on-chain si nunca se liberó).
+4. **PaymentStreaming.sol**  
+   - Gestiona la **creación, pausa, reanudación, actualización y cancelación** de los streams.  
+   - Valida que haya fondos suficientes en la `Treasury` para crear nuevos streams, aplicando una comisión si procede.  
+   - Calcula cuánto puede retirar cada empleado (`balanceOf`), permite retiros e indemnizaciones al cancelar.  
+   - Emite eventos como `StreamCreated`, `Withdraw` y `StreamCancelled`.
 
 ---
 
-## Despliegue Rápido
+## **Resumen de Funcionamiento**
 
-1. **Instalación**  
-   - Asegúrate de tener [Node.js](https://nodejs.org/) y un entorno de desarrollo para Solidity (por ejemplo, [Hardhat](https://hardhat.org/)) o [Truffle](https://trufflesuite.com/).
+1. **Creación de Compañía**  
+   - `CompanyRegistry.createCompany(companyId, ...)` cobra una **tarifa fija** al creador y lo asigna como dueño nominal.  
+   - Emite `CompanyCreated`.
 
-2. **Compilación**  
-   - Ubica los archivos `Treasury.sol`, `CompanyRegistry.sol` y `PaymentStreaming.sol` en tu carpeta de contratos.  
-   - Ejecuta el comando en Hardhat o Truffle para compilar:  
-     ```bash
-     npx hardhat compile
-     ```
-     o  
-     ```bash
-     truffle compile
-     ```
+2. **Gestión de Proyectos y Empleados**  
+   - El dueño nominal o roles autorizados (`PROJECT_ADMIN_ROLE`, admins locales) crean proyectos con `createProject`.  
+   - Añaden o retiran empleados mediante `addEmployee` / `removeEmployee`.
 
-3. **Despliegue**  
-   - Despliega `Treasury.sol` primero.  
-   - Despliega `CompanyRegistry.sol`.  
-   - Despliega `PaymentStreaming.sol`, pasando como argumentos del constructor la dirección del `Treasury` y de `CompanyRegistry`.  
-     ```bash
-     npx hardhat run scripts/deploy.js --network <networkName>
-     ```
+3. **Depósito de Fondos**  
+   - Se llama a `Treasury.depositFunds(companyId, projectId, token, amount)` o se envía Ether directamente si `token == address(0)`.  
+   - Los fondos se guardan en una sub-bóveda única para `(companyId, projectId, token)`.
 
-4. **Configuración**  
-   - Autoriza `PaymentStreaming` en la `Treasury`:
-     ```solidity
-     // Llamada a setAuthorizedContract en el contrato Treasury
-     treasury.setAuthorizedContract(paymentStreamingAddress, true);
-     ```
+4. **Creación de Streams**  
+   - Con `PaymentStreaming.createStream(...)` o `createStreamsBatch(...)`, el sistema comprueba que haya fondos suficientes en la `Treasury`, descuenta la comisión y crea los registros internos para cada stream.  
+   - Emite eventos como `StreamCreated` y `BatchStreamCreated`.
 
-5. **Tests**  
-   - Implementa pruebas unitarias (por ejemplo, en [Hardhat](https://hardhat.org/guides/testing.html)) para verificar la lógica de depósitos, retiros, creación de empresas y flujos de pago.
+5. **Retiros e Indemnizaciones**  
+   - El empleado (recipient) llama a `withdraw(streamId)` para retirar lo que haya acumulado.  
+   - Si se cancela el stream (`cancelStream`), se calcula la indemnización y se transfiere al empleado. El resto queda “disponible” para la empresa.
+
+6. **Pausa y Reanudación**  
+   - `pauseStream` / `resumeStream` permiten suspender o reactivar la acumulación de fondos, útil para ajustes temporales en la nómina.
+
+---
+
+## **Pasos de Despliegue**
+
+1. **Desplegar RoleManager**  
+2. **Desplegar CompanyRegistry** con la dirección del `RoleManager` y el `feeCollector` para recibir las tarifas.  
+3. **Desplegar Treasury** con la dirección del `RoleManager`.  
+4. **Desplegar PaymentStreaming** con la dirección de `RoleManager`, `CompanyRegistry` y `Treasury`.  
+5. **Autorizar** en `Treasury` al contrato `PaymentStreaming` para que pueda retirar fondos:  
+   ```solidity
+   treasury.setAuthorizedContract(paymentStreamingAddress, true);
+
 
 ---
 
 ## Consideraciones de Seguridad
 
-- **Access Control**:  
-  Actualmente, la autorización se maneja de manera básica (e.g. `onlyProjectOwner`). Para un entorno de producción, revisa añadir [OpenZeppelin AccessControl](https://docs.openzeppelin.com/contracts/4.x/access-control) o `Ownable` a cada contrato que requiera mayor granularidad de roles.
+- **Roles y Access Control**:  
+  Cada contrato verifica mediante roles o dueño nominal. En un entorno complejo, revisa o personaliza la lógica de acceso para cada compañía/proyecto.
 
 - **Pruebas y Auditoría**:  
   Siempre es recomendable realizar pruebas extensivas (unitarias e integradas) y, de ser posible, una auditoría externa antes de emplear estos contratos en entornos con activos reales.
 
-- **Cancelación de Streams**:  
-  Al cancelar, el contrato asume que los fondos no retirados son devueltos a la empresa. Si deseas un enfoque distinto (por ejemplo, un porcentaje de indemnización para el empleado), ajusta la lógica en `cancelStream`.
+- **CLógica de Streams**:  
+  Para evitar inconsistencias, revisa los rangos de tiempo (startTime, endTime) y el manejo de indemnizaciones.
 
-- **Overflows / Underflows**:  
-  Solidity 0.8.x incluye cheques de overflow automáticos, por lo que ya no se utiliza `SafeMath`.  
-  Aún así, revisa cuidadosamente cualquier cálculo de tasas y duraciones.
+- **Limitaciones**:  
+ Contratos no son “upgradeables” por defecto. Para cambios futuros, se requeriría un redeployment.
 
 ---
 
 ## Licencia
 
-Este proyecto está disponible bajo la licencia [MIT](https://opensource.org/licenses/MIT).
+Este proyecto está disponible bajo la licencia Propietario Único. If you know, you know.
 
 ---
 

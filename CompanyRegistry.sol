@@ -1,23 +1,25 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Propietario Unico
 pragma solidity ^0.8.28;
 
-/**
- * @title CompanyRegistry
- * @dev Registra empresas, proyectos y empleados, y gestiona roles básicos.
- */
-contract CompanyRegistry {
-    // -- Custom Errors -- //
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "./RoleManager.sol";
+
+contract CompanyRegistry is AccessControl, ReentrancyGuard {
+    RoleManager public roleManager;
+    uint256 public constant CREATE_COMPANY_FEE = 0.01 ether;
+    address public feeCollector;
+
     error CompanyAlreadyExists(uint256 companyId);
     error CompanyDoesNotExist(uint256 companyId);
-    error NotCompanyOwner(address caller, uint256 companyId);
     error ProjectAlreadyExists(uint256 projectId);
     error InvalidDates(uint256 startDate, uint256 endDate);
     error InvalidProject(uint256 projectId);
-    error NotProjectOwner(address caller, uint256 projectId);
     error EmployeeAlreadyActive(address employeeWallet, uint256 projectId);
     error EmployeeNotActive(address employeeWallet, uint256 projectId);
+    error IncorrectFee(uint256 sent, uint256 required);
+    error NotOwnerNorProjAdmin(address caller, uint256 companyId);
 
-    // -- Data Structures -- //
     struct Company {
         address owner;
         bool exists;
@@ -36,54 +38,58 @@ contract CompanyRegistry {
         bool isActive;
     }
 
-    // -- Storage -- //
-
-    // companyId -> Company
     mapping(uint256 => Company) public companies;
-
-    // projectId -> Project
     mapping(uint256 => Project) public projects;
-
-    // projectId -> (employeeWallet -> Employee)
     mapping(uint256 => mapping(address => Employee)) public employees;
 
-    // -- Events -- //
     event CompanyCreated(uint256 indexed companyId, address indexed owner);
-    event ProjectCreated(
-        uint256 indexed projectId,
-        uint256 indexed companyId,
-        uint256 startDate,
-        uint256 endDate
-    );
-    event EmployeeAdded(
-        uint256 indexed projectId,
-        address indexed employeeWallet,
-        bool hasBonus
-    );
-    event EmployeeRemoved(
-        uint256 indexed projectId,
-        address indexed employeeWallet
-    );
+    event ProjectCreated(uint256 indexed projectId, uint256 indexed companyId, uint256 startDate, uint256 endDate);
+    event EmployeeAdded(uint256 indexed projectId, address indexed employeeWallet, bool hasBonus);
+    event EmployeeRemoved(uint256 indexed projectId, address indexed employeeWallet);
 
-    // -- Modifiers -- //
+    constructor(address _feeCollector, address _roleManager) {
+        feeCollector = _feeCollector;
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        roleManager = RoleManager(_roleManager);
+    }
 
-    /**
-     * @dev Verifica que la compañía exista y que el msg.sender sea su propietario.
-     */
-    modifier onlyCompanyOwner(uint256 companyId) {
+    function createCompany(uint256 companyId) external payable nonReentrant {
+        if (msg.value != CREATE_COMPANY_FEE) {
+            revert IncorrectFee(msg.value, CREATE_COMPANY_FEE);
+        }
+        if (companies[companyId].exists) {
+            revert CompanyAlreadyExists(companyId);
+        }
+        companies[companyId] = Company({owner: msg.sender, exists: true});
+        roleManager.assignRole(msg.sender, roleManager.COMPANY_OWNER_ROLE());
+        emit CompanyCreated(companyId, msg.sender);
+        if (feeCollector != address(0)) {
+            (bool success, ) = feeCollector.call{value: msg.value}("");
+            require(success, "Fee transfer failed");
+        }
+    }
+
+    function createProject(uint256 projectId, uint256 companyId, uint256 startDate, uint256 endDate) external {
         if (!companies[companyId].exists) {
             revert CompanyDoesNotExist(companyId);
         }
-        if (msg.sender != companies[companyId].owner) {
-            revert NotCompanyOwner(msg.sender, companyId);
+        if (projects[projectId].isActive) {
+            revert ProjectAlreadyExists(projectId);
         }
-        _;
+        if (startDate >= endDate) {
+            revert InvalidDates(startDate, endDate);
+        }
+        bool isOwner = (msg.sender == companies[companyId].owner);
+        bool isLocalAdmin = roleManager.isProjectAdminForCompany(companyId, msg.sender);
+        bool isGlobalAdmin = _hasGlobalProjectAdminRole(msg.sender);
+        if (!isOwner && !isLocalAdmin && !isGlobalAdmin) {
+            revert NotOwnerNorProjAdmin(msg.sender, companyId);
+        }
+        projects[projectId] = Project({companyId: companyId, startDate: startDate, endDate: endDate, isActive: true});
+        emit ProjectCreated(projectId, companyId, startDate, endDate);
     }
 
-    /**
-     * @dev Verifica que el proyecto sea válido y que el msg.sender sea el propietario de la compañía correspondiente.
-     */
-    modifier onlyProjectOwner(uint256 projectId) {
+    function addEmployee(uint256 projectId, address wallet, bool hasBonus) external {
         Project memory p = projects[projectId];
         if (!p.isActive) {
             revert InvalidProject(projectId);
@@ -91,155 +97,58 @@ contract CompanyRegistry {
         if (!companies[p.companyId].exists) {
             revert CompanyDoesNotExist(p.companyId);
         }
-        if (msg.sender != companies[p.companyId].owner) {
-            revert NotProjectOwner(msg.sender, projectId);
-        }
-        _;
-    }
-
-    // -- Funciones Principales -- //
-
-    /**
-     * @notice Crea una nueva compañía con un ID único.
-     * @param companyId ID con el que se registrará la compañía.
-     */
-    function createCompany(uint256 companyId) external {
-        if (companies[companyId].exists) {
-            revert CompanyAlreadyExists(companyId);
-        }
-        companies[companyId] = Company({
-            owner: msg.sender,
-            exists: true
-        });
-
-        emit CompanyCreated(companyId, msg.sender);
-    }
-
-    /**
-     * @notice Crea un nuevo proyecto asociado a una compañía existente.
-     * @param projectId  ID único para el proyecto.
-     * @param companyId  ID de la compañía a la que pertenece el proyecto.
-     * @param startDate  Timestamp de inicio del proyecto.
-     * @param endDate    Timestamp de finalización del proyecto.
-     */
-    function createProject(
-        uint256 projectId,
-        uint256 companyId,
-        uint256 startDate,
-        uint256 endDate
-    )
-        external
-        onlyCompanyOwner(companyId)
-    {
-        if (projects[projectId].isActive) {
-            revert ProjectAlreadyExists(projectId);
-        }
-        if (startDate >= endDate) {
-            revert InvalidDates(startDate, endDate);
-        }
-
-        projects[projectId] = Project({
-            companyId: companyId,
-            startDate: startDate,
-            endDate: endDate,
-            isActive: true
-        });
-
-        emit ProjectCreated(projectId, companyId, startDate, endDate);
-    }
-
-    /**
-     * @notice Añade un nuevo empleado a un proyecto.
-     * @param projectId  ID del proyecto al que se añade el empleado.
-     * @param wallet     Dirección del empleado (billetera).
-     * @param hasBonus   Indica si el empleado tendrá bonus.
-     */
-    function addEmployee(
-        uint256 projectId,
-        address wallet,
-        bool hasBonus
-    )
-        external
-        onlyProjectOwner(projectId)
-    {
         if (employees[projectId][wallet].isActive) {
             revert EmployeeAlreadyActive(wallet, projectId);
         }
-
-        employees[projectId][wallet] = Employee({
-            wallet: wallet,
-            hasBonus: hasBonus,
-            isActive: true
-        });
-
+        bool isOwner = (msg.sender == companies[p.companyId].owner);
+        bool isLocalAdmin = roleManager.isProjectAdminForCompany(p.companyId, msg.sender);
+        bool isGlobalAdmin = _hasGlobalProjectAdminRole(msg.sender);
+        if (!isOwner && !isLocalAdmin && !isGlobalAdmin) {
+            revert NotOwnerNorProjAdmin(msg.sender, p.companyId);
+        }
+        employees[projectId][wallet] = Employee({wallet: wallet, hasBonus: hasBonus, isActive: true});
         emit EmployeeAdded(projectId, wallet, hasBonus);
     }
 
-    /**
-     * @notice Desactiva (elimina) un empleado de un proyecto.
-     * @param projectId   ID del proyecto.
-     * @param wallet      Dirección del empleado a desactivar.
-     */
-    function removeEmployee(uint256 projectId, address wallet)
-        external
-        onlyProjectOwner(projectId)
-    {
+    function removeEmployee(uint256 projectId, address wallet) external {
+        Project memory p = projects[projectId];
+        if (!p.isActive) {
+            revert InvalidProject(projectId);
+        }
+        if (!companies[p.companyId].exists) {
+            revert CompanyDoesNotExist(p.companyId);
+        }
         if (!employees[projectId][wallet].isActive) {
             revert EmployeeNotActive(wallet, projectId);
         }
+        bool isOwner = (msg.sender == companies[p.companyId].owner);
+        bool isLocalAdmin = roleManager.isProjectAdminForCompany(p.companyId, msg.sender);
+        bool isGlobalAdmin = _hasGlobalProjectAdminRole(msg.sender);
+        if (!isOwner && !isLocalAdmin && !isGlobalAdmin) {
+            revert NotOwnerNorProjAdmin(msg.sender, p.companyId);
+        }
         employees[projectId][wallet].isActive = false;
-
         emit EmployeeRemoved(projectId, wallet);
     }
 
-    // -- Helpers / Getters -- //
-
-    /**
-     * @notice Consulta si un empleado específico está activo en un proyecto.
-     * @param projectId  ID del proyecto.
-     * @param wallet     Dirección del empleado.
-     * @return bool      Indica si el empleado está activo.
-     */
-    function isEmployeeActive(uint256 projectId, address wallet)
-        external
-        view
-        returns (bool)
-    {
+    function isEmployeeActive(uint256 projectId, address wallet) external view returns (bool) {
         return employees[projectId][wallet].isActive;
     }
 
-    /**
-     * @notice Retorna la información de un proyecto.
-     * @param projectId  ID del proyecto.
-     * @return companyId ID de la compañía que creó el proyecto.
-     * @return startDate Timestamp de inicio.
-     * @return endDate   Timestamp de fin.
-     * @return isActive  Indica si el proyecto está activo.
-     */
-    function getProjectInfo(uint256 projectId)
-        external
-        view
-        returns (
-            uint256 companyId,
-            uint256 startDate,
-            uint256 endDate,
-            bool isActive
-        )
-    {
+    function getProjectInfo(uint256 projectId) external view returns (uint256 companyId, uint256 startDate, uint256 endDate, bool isActive) {
         Project memory p = projects[projectId];
         return (p.companyId, p.startDate, p.endDate, p.isActive);
     }
 
-    /**
-     * @notice Obtiene la dirección del propietario de una compañía.
-     * @param companyId ID de la compañía.
-     * @return Dirección que es propietaria de la compañía.
-     */
-    function getCompanyOwner(uint256 companyId)
-        external
-        view
-        returns (address)
-    {
+    function getCompanyOwner(uint256 companyId) external view returns (address) {
         return companies[companyId].owner;
+    }
+
+    function _hasGlobalProjectAdminRole(address user) internal view returns (bool) {
+        return roleManager.hasRoleCustom(roleManager.PROJECT_ADMIN_ROLE(), user);
+    }
+
+    function setFeeCollector(address newCollector) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        feeCollector = newCollector;
     }
 }
